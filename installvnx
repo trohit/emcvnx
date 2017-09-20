@@ -1,0 +1,113 @@
+#!/bin/bash
+################################################################
+# quick and dirty script to install a new nas.exe image on a VNX
+################################################################
+#config variables
+STAGING=/home/nasadmin/images
+BUILD_SERVER="1.2.3.4"
+IMG_URL="${BUILD_SERVER}:8000/NAS.exe"
+BACKUP_IMG=/home/nasadmin/nas.backup
+DUMP_DIR=/nas/var/dump
+# endconfig
+DM_COUNT=`/nas/bin/nas_server -info -list  | sed "1d" | sed '/^$/d' | wc -l`
+
+backup_img()
+{
+    if [ ! -f ${BACKUP_IMG} ]; then
+        echo "Creating a backup image"
+        time cp -v /nas/dos/bin/nas.exe ${BACKUP_IMG}
+        if [ $? -eq 0 ]; then
+            SIG1=`md5sum /nas/dos/bin/nas.exe  |awk {'print $1'}`
+            SIG2=`md5sum ${BACKUP_IMG}  |awk {'print $1'}`
+            if [ "${SIG1}" != "${SIG2}" ]; then
+                    echo "- Error while creating backup image"
+                    exit 1
+            fi
+            echo "[+] Backup image created at ${BACKUP_IMG}"
+        else
+                echo "- Unable to create a backup image"
+                exit 1
+        fi
+    fi
+}
+
+clean_cores()
+{
+echo "[+] cleaning the existing cores"
+/nas/sbin/dump_slot -c 0
+/nas/sbin/dump_slot -c 1
+/nas/sbin/dump_slot -c 2
+}
+
+get_img()
+{
+mkdir -p $STAGING
+cd $STAGING
+rm $STAGING/NAS.exe $STAGING/NAS.exe.gz 2>/dev/null
+wget ${IMG_URL}
+test $? -eq 0  || { echo "- Unable to download image" 1>&2; exit 1; }
+md5sum $STAGING/NAS.exe
+echo "+ Image downloaded"
+}
+install_img()
+{
+echo "+ Zipping Image before installing"
+gzip $STAGING/NAS.exe
+md5sum $STAGING/NAS.exe.gz
+echo "+ Zipped image size is"
+echo `ls -lh $STAGING/NAS.exe.gz`
+echo "+ Copying zipped image to install dir"
+time cp -v $STAGING/NAS.exe.gz /nas/dos/bin/nas.exe
+test "$?" -eq "0" || { echo "- Unable to copy image" 1>&2 ; exit 1; }
+md5sum /nas/dos/bin/nas.exe
+server_setup server_2 -L nas.exe
+test "$?" -eq 0 || { echo "- Unable to setup image for installation" 1>&2 ; exit 1; }
+server_version ALL
+}
+
+reboot_dm()
+{
+echo "+ Rebooting VNX"
+t2reset -s 2 reboot
+sleep 30
+}
+
+wait_for_reboot()
+{
+while true
+do
+        #$PANIC=`/nas/sbin/getreason 2>&1 |grep -c panic`
+        #$CONTACTED=`/nas/sbin/getreason 2>&1 |grep -c contacted`
+        if [ "`/nas/sbin/getreason 2>&1 |grep -c contacted`" == "$DM_COUNT" ]; then
+                echo "+ VNX is UP"
+                break
+        fi
+        if [ "`/nas/sbin/getreason 2>&1 |grep -c panic`" != "0" ]; then
+                echo "+ VNX Panic detected"
+                break
+        fi
+        /nas/sbin/getreason |grep slot_2 | awk '{print $NF}'
+        date
+        echo "+ this takes at least 2 mins"
+        echo "+ sleeping for a min.."
+        # usually takes at least 140 secs to change from reset - booted
+        # reset - booted - loaded - configured - contacted
+        # rebooting vnx takes about 3.5 mins with t2reset
+        sleep 60
+done
+}
+#main
+#for i in {1..30}; do echo -n "$i "; date ; getreason |grep slot_2; sleep 10; done
+clean_cores
+backup_img
+get_img
+install_img
+reboot_dm
+wait_for_reboot
+getreason
+server_version ALL
+ls -lh $DUMP_DIR
+
+# in case we want to look at the serial logs
+#tail -f /var/log/t2cap_slot_2.log|strings | tee >( grep -qx "initFS")
+#( tail -f -n0 /var/log/t2cap_slot_2.log | strings & ) | grep -q "VFSCoreInit"
